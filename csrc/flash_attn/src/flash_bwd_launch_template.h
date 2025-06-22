@@ -349,3 +349,29 @@ void run_mha_bwd_hdim256(Flash_bwd_params &params, cudaStream_t stream) {
         }
     });
 }
+
+template<typename T>
+void run_mha_bwd_hdim288_hdim256(Flash_bwd_params &params, cudaStream_t stream) {
+    constexpr static int HeaddimQ = 288;  // Query/Key的head维度
+    constexpr static int HeaddimV = 256;  // Value的head维度
+    int device;
+    cudaGetDevice(&device);
+    int max_smem_per_block;
+    cudaError status_ = cudaDeviceGetAttribute(
+        &max_smem_per_block, cudaDevAttrMaxSharedMemoryPerBlockOptin, device);
+    if (status_ != cudaSuccess) {
+      C10_CUDA_CHECK(status_);
+    }
+
+    DROPOUT_SWITCH(params.p_dropout < 1.f, Is_dropout, [&] {
+        if (max_smem_per_block >= 176 * 1024) {  // H100等高性能GPU
+            run_flash_bwd<Flash_bwd_kernel_traits<HeaddimQ, HeaddimV, 64, 64, 8, 4, 4, 4, false, false, T>, Is_dropout>(params, stream);
+        } else if (max_smem_per_block >= 144 * 1024) {  // A100等主流GPU
+            run_flash_bwd<Flash_bwd_kernel_traits<HeaddimQ, HeaddimV, 64, 64, 8, 4, 4, 4, false, true, T>, Is_dropout>(params, stream);
+        } else {  // 低端GPU（如T4，共享内存较小）
+            if constexpr (!Is_dropout) {
+                run_flash_bwd<Flash_bwd_kernel_traits<HeaddimQ, HeaddimV, 64, 64, 8, 4, 4, 4, true, true, T>, false>(params, stream);
+            }
+        }
+    });
+}

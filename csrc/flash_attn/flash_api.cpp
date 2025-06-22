@@ -370,8 +370,8 @@ mha_fwd(at::Tensor &q,         // batch_size x seqlen_q x num_heads x head_size
     const int seqlen_k = k.size(1);
     const int num_heads_k = k.size(2);
     TORCH_CHECK(batch_size > 0, "batch size must be postive");
-    TORCH_CHECK(head_size_og <= 256, "FlashAttention forward only supports head dimension at most 256");
-    TORCH_CHECK(head_size_og_value <= 256, "FlashAttention forward only supports head dimension at most 256");
+    TORCH_CHECK(head_size_og <= 288, "FlashAttention forward only supports head dimension at most 288");
+    TORCH_CHECK(head_size_og_value <= 256, "FlashAttention forward only supports value head dimension at most 256");
     TORCH_CHECK(num_heads % num_heads_k == 0, "Number of heads in key/value must divide number of heads in query");
     TORCH_CHECK(head_size_og >= head_size_og_value, "Head dimension of query/key must greater or equal to head dimension in query");
 
@@ -609,8 +609,8 @@ mha_varlen_fwd(at::Tensor &q,  // total_q x num_heads x head_size, total_q := \s
     const int total_q = q.sizes()[0];
 
     TORCH_CHECK(batch_size > 0, "batch size must be positive");
-    TORCH_CHECK(head_size_og <= 256, "FlashAttention forward only supports head dimension at most 256");
-    TORCH_CHECK(head_size_value <= 256, "FlashAttention forward only supports head dimension at most 256");
+    TORCH_CHECK(head_size_og <= 288, "FlashAttention forward only supports head dimension at most 256");
+    TORCH_CHECK(head_size_value <= 256, "FlashAttention forward only supports value head dimension at most 256");
     TORCH_CHECK(num_heads % num_heads_k == 0, "Number of heads in key/value must divide number of heads in query");
 
     if (window_size_left >= max_seqlen_k) { window_size_left = -1; }
@@ -855,8 +855,8 @@ mha_bwd(const at::Tensor &dout,  // batch_size x seqlen_q x num_heads, x head_si
     const int num_heads_k = k.size(2);
     TORCH_CHECK(batch_size > 0, "batch size must be positive");
     TORCH_CHECK(head_size % 8 == 0, "head_size should be a multiple of 8");
-    TORCH_CHECK(head_size <= 256, "FlashAttention backward only supports head dimension at most 256");
-    TORCH_CHECK(head_size_value <= 256, "FlashAttention backward only supports head dimension at most 256");
+    TORCH_CHECK(head_size <= 288, "FlashAttention backward only supports head dimension at most 288");
+    TORCH_CHECK(head_size_value <= 256, "FlashAttention backward only supports value head dimension at most 256");
     if (head_size > 192 && (head_size <= 224 || is_dropout)) {
         TORCH_CHECK(is_sm80 || is_sm90, "FlashAttention backward for head dim 256 with dropout, or head dim 224 with/without dropout requires A100/A800 or H100/H800");
     }
@@ -1098,8 +1098,8 @@ mha_varlen_bwd(const at::Tensor &dout,  // total_q x num_heads, x head_size
     TORCH_CHECK(batch_size > 0, "batch size must be positive");
     TORCH_CHECK(head_size % 8 == 0, "head_size should be a multiple of 8");
     TORCH_CHECK(head_size_value % 8 == 0, "head_size_value should be a multiple of 8");
-    TORCH_CHECK(head_size <= 256, "FlashAttention backward only supports head dimension at most 256");
-    TORCH_CHECK(head_size_value <= 256, "FlashAttention backward only supports head dimension at most 256");
+    TORCH_CHECK(head_size <= 288, "FlashAttention backward only supports head dimension at most 288");
+    TORCH_CHECK(head_size_value <= 256, "FlashAttention backward only supports value head dimension at most 256");
     if (head_size > 192 && (head_size <= 224 || is_dropout)) {
         TORCH_CHECK(is_sm80 || is_sm90, "FlashAttention backward for head dim 256 with dropout, or head dim 224 with/without dropout requires A100/A800 or H100/H800");
     }

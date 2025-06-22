@@ -388,3 +388,40 @@ void run_mha_fwd_hdim256(Flash_fwd_params &params, cudaStream_t stream) {
         });
     });
 }
+
+template<typename T>
+void run_mha_fwd_hdim288_hdim256(Flash_fwd_params &params, cudaStream_t stream) {
+    constexpr static int HeaddimQ = 288;  // Query/Key的head维度
+    constexpr static int HeaddimV = 256;  // Value的head维度
+    int device;
+    cudaGetDevice(&device);
+    int max_smem_per_block;
+    cudaError status_ = cudaDeviceGetAttribute(
+        &max_smem_per_block, cudaDevAttrMaxSharedMemoryPerBlockOptin, device);
+    if (status_ != cudaSuccess) {
+        C10_CUDA_CHECK(status_);
+    }
+
+    DROPOUT_SWITCH(params.p_dropout < 1.f, Is_dropout, [&] {
+        BOOL_SWITCH(params.is_causal, Is_causal, [&] {
+            // 高性能GPU（如H100/A100），共享内存 >= 144KB
+            if (max_smem_per_block >= 144 * 1024) {
+                if constexpr(!Is_dropout) {
+                    // 无Dropout时使用更大的分块（128x64）和更多Warps（8）
+                    run_flash_fwd<Flash_fwd_kernel_traits<HeaddimQ, HeaddimV, 128, 64, 8, false, false, T>, Is_dropout, Is_causal>(params, stream);
+                } else {
+                    // 有Dropout时减少分块（64x64）以节省共享内存
+                    run_flash_fwd<Flash_fwd_kernel_traits<HeaddimQ, HeaddimV, 64, 64, 4, false, false, T>, Is_dropout, Is_causal>(params, stream);
+                }
+            } else {
+                // 低端GPU（如T4），共享内存较小，强制使用更保守的配置
+                if constexpr(!Is_dropout) {
+                    run_flash_fwd<Flash_fwd_kernel_traits<HeaddimQ, HeaddimV, 64, 32, 4, false, false, T>, Is_dropout, Is_causal>(params, stream);
+                } else {
+                    // 如果必须支持Dropout，可能需要进一步减小分块
+                    run_flash_fwd<Flash_fwd_kernel_traits<HeaddimQ, HeaddimV, 32, 32, 2, false, false, T>, Is_dropout, Is_causal>(params, stream);
+                }
+            }
+        });
+    });
+}

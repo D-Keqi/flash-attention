@@ -116,5 +116,11 @@
       constexpr static int kHeadDimQ = 256;   \
       constexpr static int kHeadDimV = 256;   \
       return __VA_ARGS__();                   \
+    } else if (HEADDIMQ <= 288) {             \
+      constexpr static int kHeadDimQ = 288;   \
+      if (HEADDIMV <= 256) {                  \
+        constexpr static int kHeadDimV = 256; \
+        return __VA_ARGS__();                 \
+      }                                       \
     }                                         \
   }()
