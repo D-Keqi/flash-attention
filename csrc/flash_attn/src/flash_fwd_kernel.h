@@ -126,12 +126,35 @@ inline __device__ void compute_attn_1rowblock(const Params &params, const int bi
                             make_stride(params.k_row_stride, params.k_head_stride, _1{}));
     Tensor gK = local_tile(mK(_, bidh / params.h_h_k_ratio, _), Shape<Int<kBlockN>, Int<kHeadDim>>{},
                            make_coord(_, 0));  // (kBlockN, kHeadDim, nblocksN)
-    Tensor mV = make_tensor(make_gmem_ptr(reinterpret_cast<Element*>(params.v_ptr)
-                                          + binfo.k_offset(params.v_batch_stride, params.v_row_stride, bidb)),
-                            make_shape(binfo.actual_seqlen_k, params.h_k, params.d_value),
-                            make_stride(params.v_row_stride, params.v_head_stride, _1{}));
-    Tensor gV = local_tile(mV(_, bidh / params.h_h_k_ratio, _), Shape<Int<kBlockN>, Int<kHeadDimV>>{},
-                           make_coord(_, 0));  // (kBlockN, kHeadDim, nblocksN)
+    
+    auto gV = [&]() {
+    if (params.v_ptr == params.k_ptr) {
+        // 复用 key 的前 kHeadDimV 维作为 value
+        return local_tile(
+            mK(_, bidh / params.h_h_k_ratio, _),  // 从 mK 切片
+            Shape<Int<kBlockN>, Int<kHeadDimV>>{}, // 分块形状 (kBlockN, kHeadDimV)
+            make_coord(_, 0)                      // 坐标映射
+        );
+    } else {
+        // 独立加载 value
+        Tensor mV = make_tensor(
+            make_gmem_ptr(reinterpret_cast<Element*>(params.v_ptr) + binfo.k_offset(params.v_batch_stride, params.v_row_stride, bidb)),
+            make_shape(binfo.actual_seqlen_k, params.h_k, params.d_value),
+            make_stride(params.v_row_stride, params.v_head_stride, _1{})
+        );
+        return local_tile(
+            mV(_, bidh / params.h_h_k_ratio, _),  // 从 mV 切片
+            Shape<Int<kBlockN>, Int<kHeadDimV>>{}, // 分块形状 (kBlockN, kHeadDimV)
+            make_coord(_, 0)                      // 坐标映射
+        );
+    }
+	}();  // 立即执行 lambda
+    // Tensor mV = make_tensor(make_gmem_ptr(reinterpret_cast<Element*>(params.v_ptr)
+    //                                       + binfo.k_offset(params.v_batch_stride, params.v_row_stride, bidb)),
+    //                         make_shape(binfo.actual_seqlen_k, params.h_k, params.d_value),
+    //                         make_stride(params.v_row_stride, params.v_head_stride, _1{}));
+    // Tensor gV = local_tile(mV(_, bidh / params.h_h_k_ratio, _), Shape<Int<kBlockN>, Int<kHeadDimV>>{},
+    //                        make_coord(_, 0));  // (kBlockN, kHeadDim, nblocksN)
     Tensor gP = make_tensor(make_gmem_ptr(reinterpret_cast<Element *>(params.p_ptr) + row_offset_p),
                             Shape<Int<kBlockM>, Int<kBlockN>>{},
                             make_stride(params.seqlen_k_rounded, _1{}));
