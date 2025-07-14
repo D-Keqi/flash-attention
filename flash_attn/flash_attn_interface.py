@@ -1102,7 +1102,7 @@ def flash_attn_with_kvcache(
     window_size=(-1, -1),  # -1 means infinite context window
     rotary_interleaved=True,
     alibi_slopes=None,
-    num_splits=0,
+    num_splits=1,
 ):
     """
     If k and v are not None, k_cache and v_cache will be updated *inplace* with the new values from
@@ -1235,7 +1235,7 @@ def flash_attn_with_kvcache_mtla(
     window_size=(-1, -1),  # -1 means infinite context window
     rotary_interleaved=True,
     alibi_slopes=None,
-    num_splits=0,
+    num_splits=1,
 ):
     """
     If k and v are not None, k_cache and v_cache will be updated *inplace* with the new values from
