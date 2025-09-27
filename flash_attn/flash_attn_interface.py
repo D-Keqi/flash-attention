@@ -1238,85 +1238,66 @@ def flash_attn_with_kvcache_mtla(
     num_splits=1,
 ):
     """
-    If k and v are not None, k_cache and v_cache will be updated *inplace* with the new values from
-    k and v. This is useful for incremental decoding: you can pass in the cached keys/values from
-    the previous step, and update them with the new keys/values from the current step, and do
-    attention with the updated cache, all in 1 kernel.
+    Multi-Head Temporal Latent Attention (MTLA) with KV cache support.
+    (https://arxiv.org/abs/2505.13544)
 
-    If you pass in k / v, you must make sure that the cache is large enough to hold the new values.
-    For example, the KV cache could be pre-allocated with the max sequence length, and you can use
-    cache_seqlens to keep track of the current sequence lengths of each sequence in the batch.
+    Key differences from standard attention:
+        - `k_cache` is not the usual key tensor, but the latent representation C
+          used in Multi-Head Latent (or Temporal Latent) Attention.
+        - C encodes both the low-rank latent vector and the decoupled rotary positional
+          encoding (RoPE). During attention computation, the *value* is derived as the
+          non-RoPE part of C.
+        - Since the value vectors can be reconstructed from C, we only need to know
+          `value_head_dim` (the dimension of the value subspace), without explicitly
+          storing or reading a separate V cache.
+        - This design significantly reduces memory reads during inference, which is
+          particularly beneficial since autoregressive decoding is often memory-bound.
 
-    Also apply rotary embedding if rotary_cos and rotary_sin are passed in. The key @k will be
-    rotated by rotary_cos and rotary_sin at indices cache_seqlens, cache_seqlens + 1, etc.
-    If causal or local (i.e., window_size != (-1, -1)), the query @q will be rotated by rotary_cos
-    and rotary_sin at indices cache_seqlens, cache_seqlens + 1, etc.
-    If not causal and not local, the query @q will be rotated by rotary_cos and rotary_sin at
-    indices cache_seqlens only (i.e. we consider all tokens in @q to be at position cache_seqlens).
+    Incremental decoding:
+        If `k` is provided, `k_cache` will be updated *inplace* with the new latent
+        vectors C. You can maintain a preallocated cache for the maximum sequence length
+        and use `cache_seqlens` to track the actual sequence length for each batch item.
 
-    See tests/test_flash_attn.py::test_flash_attn_kvcache for examples of how to use this function.
+    Rotary embedding:
+        Rotary embedding is applied in a decoupled way:
+          - The latent vector C in `k_cache` already includes RoPE components.
+          - The value part (of dimension `value_head_dim`) is extracted from the
+            non-RoPE subspace of C when computing attention outputs.
+        This ensures that RoPE affects only the key/query interaction, not the value path.
 
-    Supports multi-query and grouped-query attention (MQA/GQA) by passing in KV with fewer heads
-    than Q. Note that the number of heads in Q must be divisible by the number of heads in KV.
-    For example, if Q has 6 heads and K, V have 2 heads, head 0, 1, 2 of Q will attention to head
-    0 of K, V, and head 3, 4, 5 of Q will attention to head 1 of K, V.
-
-    If causal=True, the causal mask is aligned to the bottom right corner of the attention matrix.
-    For example, if seqlen_q = 2 and seqlen_k = 5, the causal mask (1 = keep, 0 = masked out) is:
-        1 1 1 1 0
-        1 1 1 1 1
-    If seqlen_q = 5 and seqlen_k = 2, the causal mask is:
-        0 0
-        0 0
-        0 0
-        1 0
-        1 1
-    If the row of the mask is all zero, the output will be zero.
-
-    If window_size != (-1, -1), implements sliding window local attention. Query at position i
-    will only attend to keys between
-    [i + seqlen_k - seqlen_q - window_size[0], i + seqlen_k - seqlen_q + window_size[1]] inclusive.
-
-    Note: Does not support backward pass.
+    Attention structure:
+        - Supports multi-query / grouped-query latent attention (MQA/GQA).
+          The number of Q heads must be divisible by the number of latent heads in C.
+          For example, if Q has 6 heads and C has 2 latent heads, Q heads [0,1,2] map
+          to latent head 0, and Q heads [3,4,5] map to latent head 1.
+        - Causal and sliding-window local masks are handled the same way as in
+          standard flash attention.
 
     Arguments:
-        q: (batch_size, seqlen, nheads, headdim)
-        k_cache: (batch_size_cache, seqlen_cache, nheads_k, headdim) if there's no block_table,
-            or (num_blocks, page_block_size, nheads_k, headdim) if there's a block_table (i.e. paged KV cache)
-            page_block_size must be a multiple of 256.
-        v_cache: (batch_size_cache, seqlen_cache, nheads_k, headdim) if there's no block_table,
-            or (num_blocks, page_block_size, nheads_k, headdim) if there's a block_table (i.e. paged KV cache)
-        k [optional]: (batch_size, seqlen_new, nheads_k, headdim). If not None, we concatenate
-            k with k_cache, starting at the indices specified by cache_seqlens.
-        v [optional]: (batch_size, seqlen_new, nheads_k, headdim). Similar to k.
-        rotary_cos [optional]: (seqlen_ro, rotary_dim / 2). If not None, we apply rotary embedding
-            to k and q. Only applicable if k and v are passed in. rotary_dim must be divisible by 16.
-        rotary_sin [optional]: (seqlen_ro, rotary_dim / 2). Similar to rotary_cos.
-        cache_seqlens: int, or (batch_size,), dtype torch.int32. The sequence lengths of the
-            KV cache.
+        q: (batch_size, seqlen, nheads, headdim).
+        k_cache: Latent cache C, shaped
+            (batch_size_cache, seqlen_cache, nheads_k, headdim) without block_table, or
+            (num_blocks, page_block_size, nheads_k, headdim) with block_table (paged cache).
+        value_head_dim: int. Dimension of the value subspace extracted from C (non-RoPE part).
+        k [optional]: (batch_size, seqlen_new, nheads_k, headdim). If provided, concatenated
+            into k_cache at positions specified by `cache_seqlens`.
+        rotary_cos / rotary_sin [optional]: (seqlen_ro, rotary_dim/2). Apply RoPE to q and k.
+            Only applicable if k is provided. rotary_dim must be divisible by 16.
+        cache_seqlens: int or (batch_size,), dtype torch.int32. Current sequence lengths in cache.
+        cache_batch_idx: (batch_size,), dtype torch.int32. Indices to select batch entries in cache.
         block_table [optional]: (batch_size, max_num_blocks_per_seq), dtype torch.int32.
-        cache_batch_idx: (batch_size,), dtype torch.int32. The indices used to index into the KV cache.
-            If None, we assume that the batch indices are [0, 1, 2, ..., batch_size - 1].
-            If the indices are not distinct, and k and v are provided, the values updated in the cache
-                 might come from any of the duplicate indices.
-        softmax_scale: float. The scaling of QK^T before applying softmax.
-            Default to 1 / sqrt(headdim).
-        causal: bool. Whether to apply causal attention mask (e.g., for auto-regressive modeling).
-        window_size: (left, right). If not (-1, -1), implements sliding window local attention.
-        rotary_interleaved: bool. Only applicable if rotary_cos and rotary_sin are passed in.
-            If True, rotary embedding will combine dimensions 0 & 1, 2 & 3, etc. If False,
-            rotary embedding will combine dimensions 0 & rotary_dim / 2, 1 & rotary_dim / 2 + 1
-            (i.e. GPT-NeoX style).
-        alibi_slopes: (nheads,) or (batch_size, nheads), fp32. A bias of
-            (-alibi_slope * |i + seqlen_k - seqlen_q - j|)
-            is added to the attention score of query i and key j.
-        num_splits: int. If > 1, split the key/value into this many chunks along the sequence.
-           If num_splits == 1, we don't split the key/value. If num_splits == 0, we use a heuristic
-           to automatically determine the number of splits.
-           Don't change this unless you know what you are doing.
+        softmax_scale: float. Scaling applied before softmax. Defaults to 1/sqrt(headdim).
+        causal: bool. Whether to apply causal masking (autoregressive).
+        window_size: (left, right). Sliding-window local attention if not (-1, -1).
+        rotary_interleaved: bool. If True, use interleaved RoPE (dim [0,1], [2,3], ...).
+            If False, use GPT-NeoX style pairing.
+        alibi_slopes: (nheads,) or (batch_size, nheads), fp32. Adds bias
+            (-alibi_slope * |i + seqlen_k - seqlen_q - j|) to attention score.
+        num_splits: int. If > 1, split K along sequence for memory efficiency.
+            If 0, automatically determine number of splits.
 
-    Return:
-        out: (batch_size, seqlen, nheads, headdim).
+    Returns:
+        out: (batch_size, seqlen, nheads, value_head_dim).
     """
     assert k_cache.stride(-1) == 1, "k_cache must have contiguous last dimension"
     #assert v_cache.stride(-1) == 1, "v_cache must have contiguous last dimension"
